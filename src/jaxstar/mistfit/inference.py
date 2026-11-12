@@ -124,12 +124,47 @@ def _check_age_table(age_obs, age_err, age_grid, age_loglike):
         raise ValueError("age_grid and age_loglike must have the same shape")
 
 
+def _check_gyro_table(prot, teff_grid, age_grid, loglike):
+    """Static argument checks for the tabulated rotation likelihood."""
+    given = (teff_grid is not None, age_grid is not None, loglike is not None)
+    if not any(given):
+        return
+    if not all(given):
+        raise ValueError("gyro_teff_grid, gyro_age_grid and gyro_loglike must be given together")
+    if prot is not None:
+        raise ValueError("use either prot or gyro_teff_grid/gyro_age_grid/gyro_loglike, not both")
+    _check_table_axis("gyro_teff_grid", teff_grid)
+    _check_table_axis("gyro_age_grid", age_grid)
+    if np.shape(loglike) != (np.shape(teff_grid)[0], np.shape(age_grid)[0]):
+        raise ValueError("gyro_loglike must have shape (len(gyro_teff_grid), len(gyro_age_grid)), "
+                         f"got shape {np.shape(loglike)}")
+
+
+def _interp_table_2d(x, y, x_grid, y_grid, values):
+    """Bilinear interpolation of a table on increasing axes, clamped at the edges.
+
+    Outside an axis the coordinate is moved to the nearest end, so the result takes
+    the end values there (with zero gradient along that axis). ``values`` must be
+    finite: a -inf node has weight 0 outside its cell and still gives NaN gradients.
+    """
+    x_grid, y_grid, values = jnp.asarray(x_grid), jnp.asarray(y_grid), jnp.asarray(values)
+    x = jnp.clip(x, x_grid[0], x_grid[-1])
+    y = jnp.clip(y, y_grid[0], y_grid[-1])
+    i = jnp.clip(jnp.searchsorted(x_grid, x, side="right") - 1, 0, x_grid.shape[0] - 2)
+    j = jnp.clip(jnp.searchsorted(y_grid, y, side="right") - 1, 0, y_grid.shape[0] - 2)
+    tx = (x - x_grid[i]) / (x_grid[i + 1] - x_grid[i])
+    ty = (y - y_grid[j]) / (y_grid[j + 1] - y_grid[j])
+    return ((1. - tx) * (1. - ty) * values[i, j] + tx * (1. - ty) * values[i + 1, j]
+            + (1. - tx) * ty * values[i, j + 1] + tx * ty * values[i + 1, j + 1])
+
+
 def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
                     flat_age_marginal=False, logamin=8, logamax=10.14,
                     fmin=-1, fmax=0.5, eepmin=0, eepmax=600,
                     massmin=0.1, massmax=2.5, dist_scale=1.35,
                     prot=None, prot_err=0.05, rho_obs=None, rho_err=None,
                     age_obs=None, age_err=None, age_grid=None, age_loglike=None,
+                    gyro_teff_grid=None, gyro_age_grid=None, gyro_loglike=None,
                     *, output_keys=None):
     """Isochrone probability model shared by NUTS and MultiNest.
 
@@ -158,11 +193,23 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
             interpolated gradient NaN; floor the table (for example at -700).
             The table must not include an age prior, because the prior comes
             from linear_age. Cannot be combined with age_obs/age_err.
+        gyro_teff_grid, gyro_age_grid, gyro_loglike: Tabulated rotation-period
+            likelihood, ln L(observed Prot | Teff, age), as a 2D array of shape
+            (len(gyro_teff_grid), len(gyro_age_grid)). The axes are finite and
+            strictly increasing (at least 2 points each), Teff in K and age in
+            Gyr. The table is interpolated bilinearly at the model Teff and age
+            (the age of the age_grid option) and takes the nearest end values
+            outside either axis. Values must be finite (floor the table, for
+            example at -700) and must not include an age prior. All three are
+            given together and cannot be combined with prot. Do not also pass
+            an age_grid/age_loglike table that already contains the same
+            rotation information, or it is counted twice.
         output_keys: Additional deterministic MistModel outputs for this call.
             A name or sequence; None/empty keeps defaults and observed outputs.
             Duplicates are ignored. Keep this argument static under JIT.
     """
     _check_age_table(age_obs, age_err, age_grid, age_loglike)
+    _check_gyro_table(prot, gyro_teff_grid, gyro_age_grid, gyro_loglike)
     saved_keys = tuple(dict.fromkeys((
         *_DEFAULT_OUTPUT_KEYS,
         *(key for key in observations.keys if key not in ('parallax', 'feh')),
@@ -239,6 +286,10 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
         numpyro.factor("loglike_age_table", jnp.interp(
             age, jnp.asarray(age_grid), jnp.asarray(age_loglike)))
 
+    if gyro_loglike is not None:
+        numpyro.factor("loglike_gyro_table", _interp_table_2d(
+            params['teff'], age, gyro_teff_grid, gyro_age_grid, gyro_loglike))
+
 
 _TRACK_OUTPUT_KEYS = (
     'kmag', 'teff', 'logg', 'mass', 'mass_init', 'radius', 'feh_photosphere',
@@ -291,6 +342,7 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
                 dist_scale=1.35, prot=None, prot_err=0.05,
                 rho_obs=None, rho_err=None, age_obs=None, age_err=None,
                 age_grid=None, age_loglike=None,
+                gyro_teff_grid=None, gyro_age_grid=None, gyro_loglike=None,
                 *, output_keys=None, age_min=None, age_max=13.8,
                 age_bound_width=0.1, age_bound_depth=30.):
     """Track probability model with initial mass/FeH/EEP/distance coordinates.
@@ -313,7 +365,8 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     They apply even with nodata=True and never change the EEP sampling bounds.
 
     Observations, optional gyro/initial-density/age constraints (including the
-    tabulated age_grid/age_loglike), distance prior, and per-call additional
+    tabulated age_grid/age_loglike and the 2D rotation table gyro_teff_grid/
+    gyro_age_grid/gyro_loglike), distance prior, and per-call additional
     output_keys follow model_isochrone.
     nodata disables only the main Gaussian observations. JAX x64 is required.
     Missing age/derivative stencils or required likelihood outputs have zero
@@ -322,6 +375,7 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     if physical_model.kind != "track":
         raise ValueError("model_track requires MistModel.from_tracks(...)")
     _check_age_table(age_obs, age_err, age_grid, age_loglike)
+    _check_gyro_table(prot, gyro_teff_grid, gyro_age_grid, gyro_loglike)
     if not jax.config.x64_enabled:
         raise ValueError("Enable JAX x64 for track inference")
     mass_bounds, mass_valid = _track_bounds(
@@ -360,6 +414,8 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     likelihood_keys = list(observations.keys) if not nodata else []
     if prot is not None:
         likelihood_keys.extend(("bpmag2", "rpmag2", "logage", "feh"))
+    if gyro_loglike is not None:
+        likelihood_keys.append("teff")
     if rho_obs is not None and rho_err is not None:
         likelihood_keys.append("radius")
     likelihood_valid = jnp.array(True)
@@ -404,6 +460,9 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     if age_grid is not None:
         numpyro.factor("loglike_age_table", jnp.interp(
             safe['age'], jnp.asarray(age_grid), jnp.asarray(age_loglike)))
+    if gyro_loglike is not None:
+        numpyro.factor("loglike_gyro_table", _interp_table_2d(
+            safe['teff'], safe['age'], gyro_teff_grid, gyro_age_grid, gyro_loglike))
 
 
 def _default_model(physical_model):

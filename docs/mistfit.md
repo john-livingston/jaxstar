@@ -161,6 +161,16 @@ exclusive with `age_obs`/`age_err`. Table values must be finite: a `-inf` node
 makes the interpolated gradient NaN, so floor the log likelihood (for example at
 -700) before passing it.
 
+A tabulated rotation likelihood replaces `prot`/`prot_err`: pass `gyro_teff_grid`
+(K), `gyro_age_grid` (Gyr) and `gyro_loglike`, a 2D array of shape
+`(len(gyro_teff_grid), len(gyro_age_grid))` holding the natural log likelihood of
+the observed rotation period given Teff and age. Both axes are finite, strictly
+increasing, and have at least 2 points. The model interpolates the table
+bilinearly at its Teff and age and takes the nearest end values outside either
+axis. As for the age table, the values must be finite, the table must not include
+an age prior, and the three arguments are given together. They are exclusive with
+`prot`, so the rotation constraint is counted once.
+
 Unsupported age/derivative or likelihood values have zero density. An unavailable
 saved-only output can be `-inf` without changing the inference target.
 
