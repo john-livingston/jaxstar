@@ -158,8 +158,8 @@ is linearly interpolated at the model age and takes its end values outside the
 grid. It must not include an age prior, because the prior comes from `linear_age`
 (use `linear_age=True` with a table that is a likelihood per unit age). It is
 exclusive with `age_obs`/`age_err`. Table values must be finite: a `-inf` node
-makes the interpolated gradient NaN, so floor the log likelihood (for example at
--700) before passing it.
+makes the interpolated gradient NaN, so a concrete NaN or infinite value raises
+`ValueError`; floor the log likelihood (for example at -700) before passing it.
 
 A tabulated rotation likelihood replaces `prot`/`prot_err`: pass `gyro_teff_grid`
 (K), `gyro_age_grid` (Gyr) and `gyro_loglike`, a 2D array of shape

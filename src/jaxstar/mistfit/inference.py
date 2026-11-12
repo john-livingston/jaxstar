@@ -111,6 +111,17 @@ def _check_table_axis(name, grid):
             raise ValueError(f"{name} must be finite and strictly increasing")
 
 
+def _check_table_values(name, values):
+    """Static check that table values are finite (concrete inputs only).
+
+    A -inf node makes the interpolated value or gradient non-finite near it, and NaN
+    poisons the whole density, so the caller floors the table instead.
+    """
+    if not isinstance(values, jax.core.Tracer) and not np.all(np.isfinite(np.asarray(values, dtype=float))):
+        raise ValueError(f"{name} must be finite (no NaN or infinity); "
+                         "floor the table, for example at -700")
+
+
 def _check_age_table(age_obs, age_err, age_grid, age_loglike):
     """Static argument checks for the tabulated age likelihood."""
     if (age_grid is None) != (age_loglike is None):
@@ -122,6 +133,7 @@ def _check_age_table(age_obs, age_err, age_grid, age_loglike):
     _check_table_axis("age_grid", age_grid)
     if np.shape(age_loglike) != np.shape(age_grid):
         raise ValueError("age_grid and age_loglike must have the same shape")
+    _check_table_values("age_loglike", age_loglike)
 
 
 def _check_gyro_table(prot, teff_grid, age_grid, loglike):
@@ -138,6 +150,7 @@ def _check_gyro_table(prot, teff_grid, age_grid, loglike):
     if np.shape(loglike) != (np.shape(teff_grid)[0], np.shape(age_grid)[0]):
         raise ValueError("gyro_loglike must have shape (len(gyro_teff_grid), len(gyro_age_grid)), "
                          f"got shape {np.shape(loglike)}")
+    _check_table_values("gyro_loglike", loglike)
 
 
 def _interp_table_2d(x, y, x_grid, y_grid, values):
@@ -190,7 +203,8 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
             a finite, strictly increasing grid in Gyr (at least 2 points),
             linearly interpolated (jnp.interp); outside the grid it takes the
             end values. Values must be finite, because a -inf node makes the
-            interpolated gradient NaN; floor the table (for example at -700).
+            interpolated gradient NaN; concrete NaN or infinite values raise
+            ValueError, so floor the table (for example at -700).
             The table must not include an age prior, because the prior comes
             from linear_age. Cannot be combined with age_obs/age_err.
         gyro_teff_grid, gyro_age_grid, gyro_loglike: Tabulated rotation-period
@@ -199,8 +213,9 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
             strictly increasing (at least 2 points each), Teff in K and age in
             Gyr. The table is interpolated bilinearly at the model Teff and age
             (the age of the age_grid option) and takes the nearest end values
-            outside either axis. Values must be finite (floor the table, for
-            example at -700) and must not include an age prior. All three are
+            outside either axis. Values must be finite (concrete NaN or
+            infinite values raise ValueError; floor the table, for example
+            at -700) and must not include an age prior. All three are
             given together and cannot be combined with prot. Do not also pass
             an age_grid/age_loglike table that already contains the same
             rotation information, or it is counted twice.

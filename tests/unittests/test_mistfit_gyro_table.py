@@ -176,3 +176,21 @@ def test_track_without_a_teff_value_has_no_density_under_the_table(track_path):
     gradient = jax.grad(lambda p: log_density(fit.model, (), dict(options, **table), dict(zip(LATENTS, p)))[0])(
         jnp.array(list(LATENTS.values())))
     assert np.isfinite(np.asarray(gradient)).all()
+
+
+@pytest.mark.parametrize('bad', [np.nan, -np.inf, np.inf])
+def test_nonfinite_table_values_are_rejected_with_a_floor_hint(case, bad):
+    density, _ = case
+    table = TABLE.copy()
+    table[1, 2] = bad
+    with pytest.raises(ValueError, match='finite.*floor'):
+        density(gyro_teff_grid=TEFF, gyro_age_grid=AGE, gyro_loglike=table)
+
+
+def test_traced_table_values_work_under_jit(case):
+    density, _ = case
+    kwargs = dict(gyro_teff_grid=TEFF, gyro_age_grid=AGE)
+    eager = density(gyro_loglike=TABLE, **kwargs)[0]
+    point = {k: jnp.asarray(v) for k, v in density.parameters.items()}  # arrays, not Python floats, under jit
+    traced = jax.jit(lambda values: density(point, gyro_loglike=values, **kwargs)[0])(TABLE)
+    np.testing.assert_allclose(traced, eager, rtol=0., atol=1e-10)

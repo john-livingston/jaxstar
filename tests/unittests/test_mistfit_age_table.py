@@ -101,3 +101,20 @@ def test_argument_checks(case, options, message):
     density, _ = case
     with pytest.raises(ValueError, match=message):
         density(**options)
+
+
+@pytest.mark.parametrize('bad', [np.nan, -np.inf, np.inf])
+def test_nonfinite_table_values_are_rejected_with_a_floor_hint(case, bad):
+    density, _ = case
+    loglike = GAUSSIAN.copy()
+    loglike[3] = bad
+    with pytest.raises(ValueError, match='finite.*floor'):
+        density(age_grid=GRID, age_loglike=loglike)
+
+
+def test_traced_table_values_work_under_jit(case):
+    density, _ = case
+    eager = density(age_grid=GRID, age_loglike=GAUSSIAN)[0]
+    point = {k: jnp.asarray(v) for k, v in density.parameters.items()}  # arrays, not Python floats, under jit
+    traced = jax.jit(lambda values: density(point, age_grid=GRID, age_loglike=values)[0])(GAUSSIAN)
+    np.testing.assert_allclose(traced, eager, rtol=0., atol=1e-10)
