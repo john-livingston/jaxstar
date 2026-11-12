@@ -100,12 +100,37 @@ def smbound(x, low=None, upp=None, s=20, depth=30):
     return -depth*(1./(jnp.exp(s*(x-low))+1)+1./(jnp.exp(-s*(x-upp))+1))
 
 
+def _check_table_axis(name, grid):
+    """Static check of a table axis: 1D, at least two points, finite, strictly increasing."""
+    shape = np.shape(grid)
+    if len(shape) != 1 or shape[0] < 2:
+        raise ValueError(f"{name} must be a 1D array with at least 2 points")
+    if not isinstance(grid, jax.core.Tracer):
+        values = np.asarray(grid, dtype=float)
+        if not (np.all(np.isfinite(values)) and np.all(np.diff(values) > 0)):
+            raise ValueError(f"{name} must be finite and strictly increasing")
+
+
+def _check_age_table(age_obs, age_err, age_grid, age_loglike):
+    """Static argument checks for the tabulated age likelihood."""
+    if (age_grid is None) != (age_loglike is None):
+        raise ValueError("age_grid and age_loglike must be given together")
+    if age_grid is None:
+        return
+    if age_obs is not None or age_err is not None:
+        raise ValueError("use either age_obs/age_err or age_grid/age_loglike, not both")
+    _check_table_axis("age_grid", age_grid)
+    if np.shape(age_loglike) != np.shape(age_grid):
+        raise ValueError("age_grid and age_loglike must have the same shape")
+
+
 def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
                     flat_age_marginal=False, logamin=8, logamax=10.14,
                     fmin=-1, fmax=0.5, eepmin=0, eepmax=600,
                     massmin=0.1, massmax=2.5, dist_scale=1.35,
                     prot=None, prot_err=0.05, rho_obs=None, rho_err=None,
-                    age_obs=None, age_err=None, *, output_keys=None):
+                    age_obs=None, age_err=None, age_grid=None, age_loglike=None,
+                    *, output_keys=None):
     """Isochrone probability model shared by NUTS and MultiNest.
 
     Args:
@@ -126,10 +151,18 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
         rho_obs, rho_err: Gaussian constraint on INITIAL mass / radius**3 in
             solar units, retained for historical compatibility.
         age_obs, age_err: Gaussian constraint on age in Gyr.
+        age_grid, age_loglike: Tabulated log-likelihood of age, ln L(age), on
+            a finite, strictly increasing grid in Gyr (at least 2 points),
+            linearly interpolated (jnp.interp); outside the grid it takes the
+            end values. Values must be finite, because a -inf node makes the
+            interpolated gradient NaN; floor the table (for example at -700).
+            The table must not include an age prior, because the prior comes
+            from linear_age. Cannot be combined with age_obs/age_err.
         output_keys: Additional deterministic MistModel outputs for this call.
             A name or sequence; None/empty keeps defaults and observed outputs.
             Duplicates are ignored. Keep this argument static under JIT.
     """
+    _check_age_table(age_obs, age_err, age_grid, age_loglike)
     saved_keys = tuple(dict.fromkeys((
         *_DEFAULT_OUTPUT_KEYS,
         *(key for key in observations.keys if key not in ('parallax', 'feh')),
@@ -202,6 +235,10 @@ def model_isochrone(observations, physical_model, nodata=False, linear_age=True,
         numpyro.factor("loglike_age", -0.5 *
                        (age_obs - age_model)**2 / age_err**2)
 
+    if age_grid is not None:
+        numpyro.factor("loglike_age_table", jnp.interp(
+            age, jnp.asarray(age_grid), jnp.asarray(age_loglike)))
+
 
 _TRACK_OUTPUT_KEYS = (
     'kmag', 'teff', 'logg', 'mass', 'mass_init', 'radius', 'feh_photosphere',
@@ -253,6 +290,7 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
                 eepmin=None, eepmax=None, massmin=None, massmax=None,
                 dist_scale=1.35, prot=None, prot_err=0.05,
                 rho_obs=None, rho_err=None, age_obs=None, age_err=None,
+                age_grid=None, age_loglike=None,
                 *, output_keys=None, age_min=None, age_max=13.8,
                 age_bound_width=0.1, age_bound_depth=30.):
     """Track probability model with initial mass/FeH/EEP/distance coordinates.
@@ -274,14 +312,16 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     outside (default depth 30). These are soft weights, not hard exclusions.
     They apply even with nodata=True and never change the EEP sampling bounds.
 
-    Observations, optional gyro/initial-density/age constraints, distance
-    prior, and per-call additional output_keys follow model_isochrone.
+    Observations, optional gyro/initial-density/age constraints (including the
+    tabulated age_grid/age_loglike), distance prior, and per-call additional
+    output_keys follow model_isochrone.
     nodata disables only the main Gaussian observations. JAX x64 is required.
     Missing age/derivative stencils or required likelihood outputs have zero
     density. Unsupported saved-only outputs do not restrict the prior.
     """
     if physical_model.kind != "track":
         raise ValueError("model_track requires MistModel.from_tracks(...)")
+    _check_age_table(age_obs, age_err, age_grid, age_loglike)
     if not jax.config.x64_enabled:
         raise ValueError("Enable JAX x64 for track inference")
     mass_bounds, mass_valid = _track_bounds(
@@ -361,6 +401,9 @@ def model_track(observations, physical_model, nodata=False, linear_age=True,
     if age_obs is not None and age_err is not None:
         numpyro.factor("loglike_age", -0.5 *
                        (age_obs - safe['age'])**2 / age_err**2)
+    if age_grid is not None:
+        numpyro.factor("loglike_age_table", jnp.interp(
+            safe['age'], jnp.asarray(age_grid), jnp.asarray(age_loglike)))
 
 
 def _default_model(physical_model):

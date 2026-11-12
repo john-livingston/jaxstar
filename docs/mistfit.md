@@ -151,6 +151,16 @@ constraints include `age_obs`/`age_err`, `rho_obs`/`rho_err`, and rotation-perio
 `prot`/`prot_err`. The `rho_obs` constraint uses `rho_initial`: **initial** mass
 divided by radius cubed, in solar density units.
 
+A tabulated age likelihood replaces `age_obs`/`age_err` when the age constraint is
+not Gaussian: pass `age_grid` (increasing, in Gyr) and `age_loglike` (natural log
+likelihood at each grid age, 1D arrays of equal length of at least 2). The table
+is linearly interpolated at the model age and takes its end values outside the
+grid. It must not include an age prior, because the prior comes from `linear_age`
+(use `linear_age=True` with a table that is a likelihood per unit age). It is
+exclusive with `age_obs`/`age_err`. Table values must be finite: a `-inf` node
+makes the interpolated gradient NaN, so floor the log likelihood (for example at
+-700) before passing it.
+
 Unsupported age/derivative or likelihood values have zero density. An unavailable
 saved-only output can be `-inf` without changing the inference target.
 
